@@ -32,6 +32,7 @@ import qualified Haskell.Ide.Engine.Plugin.HieExtras          as Hie
 import           Language.Haskell.GHC.ExactPrint.Print
 import qualified Language.Haskell.LSP.Core                    as Core
 import qualified Language.Haskell.LSP.Types                   as J
+import qualified Language.Haskell.LSP.Types.Lens              as J
 import           Language.Haskell.Refact.API                  hiding (logm)
 import           Language.Haskell.Refact.HaRe
 import           Language.Haskell.Refact.Utils.Monad          hiding (logm)
@@ -293,8 +294,8 @@ hoist f a =
 codeActionProvider :: CodeActionProvider
 codeActionProvider pId docId _ (J.Range pos _) _ =
   pluginGetFile "HaRe codeActionProvider: " (docId ^. J.uri) $ \file ->
-    ifCachedModule file (IdeResultOk mempty) $ \cm -> do
-      let symbols = getArtifactsAtPos pos (defMap cm)
+    ifCachedInfo file (IdeResultOk mempty) $ \info -> do
+      let symbols = getArtifactsAtPos pos (defMap info)
       debugm $ show $ map (Hie.showName . snd) symbols
       if not (null symbols)
         then

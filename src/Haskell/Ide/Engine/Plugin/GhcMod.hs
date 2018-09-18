@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP                 #-}
 {-# LANGUAGE DeriveGeneric       #-}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE OverloadedStrings   #-}
@@ -13,18 +12,13 @@ import           Control.Lens hiding (cons, children)
 import           Control.Lens.Setter ((%~))
 import           Control.Lens.Traversal (traverseOf)
 import           Data.Aeson
-#if __GLASGOW_HASKELL__ < 802
-import           Data.Aeson.Types
-#endif
 import           Data.Function
 import qualified Data.HashMap.Strict               as HM
 import           Data.IORef
 import           Data.List
 import qualified Data.Map.Strict                   as Map
 import           Data.Maybe
-#if __GLASGOW_HASKELL__ < 804
-import           Data.Monoid
-#endif
+import           Data.Monoid ((<>))
 import qualified Data.Set                          as Set
 import qualified Data.Text                         as T
 import qualified Data.Text.IO                      as T
@@ -49,6 +43,7 @@ import           Haskell.Ide.Engine.Plugin.HaRe (HarePoint(..))
 import qualified Haskell.Ide.Engine.Plugin.HieExtras as Hie
 import           Haskell.Ide.Engine.ArtifactMap
 import qualified Language.Haskell.LSP.Types        as LSP
+import qualified Language.Haskell.LSP.Types.Lens   as LSP
 import           Language.Haskell.Refact.API       (hsNamessRdr)
 
 import           DynFlags
@@ -195,33 +190,37 @@ setTypecheckedModule uri =
     debugm $ "setTypecheckedModule: file mapping state is: " ++ show fileMap
     rfm <- GM.mkRevRedirMapFunc
     let
-      ghcErrRes msg = ((Map.empty, [T.pack msg]),Nothing)
+      ghcErrRes msg = ((Map.empty, [T.pack msg]),Nothing,Nothing)
     debugm "setTypecheckedModule: before ghc-mod"
-    ((diags', errs), mtm) <- GM.gcatches
-                              (GM.getTypecheckedModuleGhc' (myWrapper rfm) fp)
+    ((diags', errs), mtm, mpm) <- GM.gcatches
+                              (GM.getModulesGhc' (myWrapper rfm) fp)
                               (errorHandlers ghcErrRes (return . ghcErrRes . show))
     debugm "setTypecheckedModule: after ghc-mod"
+
     canonUri <- canonicalizeUri uri
     let diags = Map.insertWith Set.union canonUri Set.empty diags'
-    case mtm of
-      Nothing -> do
-        debugm $ "setTypecheckedModule: Didn't get typechecked module for: " ++ show fp
+    case (mpm,mtm) of
+      (Just pm, Nothing) -> do
+        debugm $ "setTypecheckedModule: Did get parsed module for: " ++ show fp
+        cacheModule fp (Left pm)
+        debugm "setTypecheckedModule: done"
 
-        failModule fp
-
-        return $ IdeResultOk (diags,errs)
-      Just tm -> do
+      (_, Just tm) -> do
         debugm $ "setTypecheckedModule: Did get typechecked module for: " ++ show fp
-        typm <- GM.unGmlT $ genTypeMap tm
         sess <- fmap GM.gmgsSession . GM.gmGhcSession <$> GM.gmsGet
-        let cm = CachedModule tm (genLocMap tm) typm (genImportMap tm) (genDefMap tm) rfm return return
 
         -- set the session before we cache the module, so that deferred
         -- responses triggered by cacheModule can access it
         modifyMTS (\s -> s {ghcSession = sess})
-        cacheModule fp cm
+        cacheModule fp (Right tm)
         debugm "setTypecheckedModule: done"
-        return $ IdeResultOk (diags,errs)
+        
+      _ -> do
+        debugm $ "setTypecheckedModule: Didn't get typechecked or parsed module for: " ++ show fp
+
+        failModule fp
+
+    return $ IdeResultOk (diags,errs)
 
 -- ---------------------------------------------------------------------
 
@@ -277,30 +276,25 @@ typeCmd = CmdSync $ \(TP _bool uri pos) ->
 newTypeCmd :: Position -> Uri -> IdeM (IdeResult [(Range, T.Text)])
 newTypeCmd newPos uri =
   pluginGetFile "newTypeCmd: " uri $ \fp ->
-    ifCachedModule fp (IdeResultOk []) $ \cm ->
-      return $ IdeResultOk $ pureTypeCmd newPos cm
+    ifCachedModule fp (IdeResultOk []) $ \tm info ->
+      return $ IdeResultOk $ pureTypeCmd newPos tm info
 
-pureTypeCmd :: Position -> CachedModule -> [(Range,T.Text)]
-pureTypeCmd newPos cm  =
+pureTypeCmd :: Position -> GHC.TypecheckedModule -> CachedInfo -> [(Range,T.Text)]
+pureTypeCmd newPos tm info =
     case mOldPos of
       Nothing -> []
       Just pos -> concatMap f (spanTypes pos)
   where
-    mOldPos = newPosToOld cm newPos
-    tm = tcMod cm
-    typm = typeMap cm
+    mOldPos = newPosToOld info newPos
+    typm = typeMap info
     spanTypes' pos = getArtifactsAtPos pos typm
     spanTypes pos = sortBy (cmp `on` fst) (spanTypes' pos)
     dflag = ms_hspp_opts $ pm_mod_summary $ tm_parsed_module tm
     unqual = mkPrintUnqualified dflag $ tcg_rdr_env $ fst $ tm_internals_ tm
-#if __GLASGOW_HASKELL__ >= 802
     st = mkUserStyle dflag unqual AllTheWay
-#else
-    st = mkUserStyle unqual AllTheWay
-#endif
 
     f (range', t) =
-      case oldRangeToNew cm range' of
+      case oldRangeToNew info range' of
         (Just range) -> [(range , T.pack $ GM.pretty dflag st t)]
         _ -> []
 
@@ -321,25 +315,25 @@ splitCaseCmd' :: Uri -> Position -> IdeGhcM (IdeResult WorkspaceEdit)
 splitCaseCmd' uri newPos =
   pluginGetFile "splitCaseCmd: " uri $ \path -> do
     origText <- GM.withMappedFile path $ liftIO . T.readFile
-    ifCachedModule path (IdeResultOk mempty) $ \checkedModule -> runGhcModCommand $
-      case newPosToOld checkedModule newPos of
+    ifCachedModule path (IdeResultOk mempty) $ \tm info -> runGhcModCommand $
+      case newPosToOld info newPos of
         Just oldPos -> do
           let (line, column) = unPos oldPos
-          splitResult' <- GM.splits' path (tcMod checkedModule) line column
+          splitResult' <- GM.splits' path tm line column
           case splitResult' of
             Just splitResult -> do
               wEdit <- liftToGhc $ splitResultToWorkspaceEdit origText splitResult
-              return $ oldToNewPositions checkedModule wEdit
+              return $ oldToNewPositions info wEdit
             Nothing -> return mempty
         Nothing -> return mempty
   where
 
     -- | Transform all ranges in a WorkspaceEdit from old to new positions.
-    oldToNewPositions :: CachedModule -> WorkspaceEdit -> WorkspaceEdit
-    oldToNewPositions cMod wsEdit =
+    oldToNewPositions :: CachedInfo -> WorkspaceEdit -> WorkspaceEdit
+    oldToNewPositions info wsEdit =
       wsEdit
-        & LSP.documentChanges %~ (>>= traverseOf (traverse . LSP.edits . traverse . LSP.range) (oldRangeToNew cMod))
-        & LSP.changes %~ (>>= traverseOf (traverse . traverse . LSP.range) (oldRangeToNew cMod))
+        & LSP.documentChanges %~ (>>= traverseOf (traverse . LSP.edits . traverse . LSP.range) (oldRangeToNew info))
+        & LSP.changes %~ (>>= traverseOf (traverse . traverse . LSP.range) (oldRangeToNew info))
 
     -- | Given the range and text to replace, construct a 'WorkspaceEdit'
     -- by diffing the change against the current text.
@@ -398,7 +392,7 @@ data TypedHoles =
   TypedHoles { thDiag :: LSP.Diagnostic
              , thWant :: TypeDef
              , thSubstitutions :: ValidSubstitutions
-             , thBIndings :: Bindings
+             , thBindings :: Bindings
              } deriving (Eq, Show)
 
 codeActionProvider :: CodeActionProvider
@@ -414,7 +408,13 @@ codeActionProvider' supportsDocChanges _ docId _ _ context =
       redundantTerms = mapMaybe getRedundantImports diags
       redundantActions = concatMap (uncurry mkRedundantImportActions) redundantTerms
       typedHoleActions = concatMap mkTypedHoleActions (mapMaybe getTypedHoles diags)
-  in return $ IdeResultOk (renameActions ++ redundantActions ++ typedHoleActions)
+      missingSignatures = mapMaybe getMissingSignatures diags
+      topLevelSignatureActions = map (uncurry mkMissingSignatureAction) missingSignatures
+  in return $ IdeResultOk $ concat [ renameActions
+                                   , redundantActions
+                                   , typedHoleActions
+                                   , topLevelSignatureActions
+                                   ]
 
   where
 
@@ -475,7 +475,7 @@ codeActionProvider' supportsDocChanges _ docId _ _ context =
       | otherwise = substitutions
       where
         onlyErrorFuncs = null
-                       $ (map fsName subs) \\ ["undefined", "error", "errorWithoutStackTrace"]
+                       $ map fsName subs \\ ["undefined", "error", "errorWithoutStackTrace"]
         substitutions = map mkHoleAction subs
         suggestions = map mkHoleAction bindings
         mkHoleAction (FunctionSig name (TypeDef sig)) = codeAction
@@ -494,20 +494,39 @@ codeActionProvider' supportsDocChanges _ docId _ _ context =
         Just (want, subs, bindings) -> Just $ TypedHoles diag want subs bindings
     getTypedHoles _ = Nothing
 
+    getMissingSignatures :: LSP.Diagnostic -> Maybe (LSP.Diagnostic, T.Text)
+    getMissingSignatures diag@(LSP.Diagnostic _ _ _ (Just "ghcmod") msg _) =
+      case extractMissingSignature msg of
+        Nothing -> Nothing
+        Just signature -> Just (diag, signature)
+    getMissingSignatures _ = Nothing
+
+    mkMissingSignatureAction :: LSP.Diagnostic -> T.Text -> LSP.CodeAction
+    mkMissingSignatureAction diag sig =  codeAction
+      where title :: T.Text
+            title = "Add signature: " <> sig
+            diags = LSP.List [diag]
+            startOfLine = LSP.Position (diag ^. LSP.range . LSP.start . LSP.line) 0
+            range = LSP.Range startOfLine startOfLine
+            edit = mkWorkspaceEdit [LSP.TextEdit range (sig <> "\n")]
+            kind = LSP.CodeActionQuickFix
+            codeAction = LSP.CodeAction title (Just kind) (Just diags) (Just edit) Nothing
+
 extractRenamableTerms :: T.Text -> [T.Text]
 extractRenamableTerms msg
-  | "not in scope:" `T.isInfixOf` head noBullets = go msg
+  -- Account for both "Variable not in scope" and "Not in scope"
+  | "ot in scope:" `T.isInfixOf` msg = extractSuggestions msg
   | otherwise = []
-
-  where noBullets = T.lines $ T.replace "• " "" msg
-        -- Extract everything in between ‘ ’
-        go t
-          | t == "" = []
-          | "‘" `T.isPrefixOf` t =
-            let rest = T.tail t
-                x = T.takeWhile (/= '’') rest
-              in x:go rest
-          | otherwise = go (T.dropWhile (/= '‘') t)
+  where
+    extractSuggestions = map getEnclosed
+                       . concatMap singleSuggestions
+                       . filter isKnownSymbol
+                       . T.lines
+    singleSuggestions = T.splitOn "), " -- Each suggestion is comma delimited
+    isKnownSymbol t = " (imported from" `T.isInfixOf` t  || " (line " `T.isInfixOf` t
+    getEnclosed = T.dropWhile (== '‘')
+                . T.dropWhileEnd (== '’')
+                . T.dropAround (\c -> c /= '‘' && c /= '’')
 
 extractRedundantImport :: T.Text -> Maybe T.Text
 extractRedundantImport msg =
@@ -575,13 +594,22 @@ extractHoleSubstitutions diag
                    . keepAfter "::"
                    $ t
 
+extractMissingSignature :: T.Text -> Maybe T.Text
+extractMissingSignature msg = extractSignature <$> stripMessageStart msg
+  where
+    stripMessageStart = T.stripPrefix "Top-level binding with no type signature:"
+                      . T.strip
+    extractSignature = T.strip
+
+
 -- ---------------------------------------------------------------------
 
 hoverProvider :: HoverProvider
 hoverProvider doc pos = runIdeResultT $ do
   info' <- IdeResultT $ newTypeCmd pos doc
   names' <- IdeResultT $ pluginGetFile "ghc-mod:hoverProvider" doc $ \fp ->
-    ifCachedModule fp (IdeResultOk []) (return . IdeResultOk . Hie.getSymbolsAtPoint pos)
+    ifCachedModule fp (IdeResultOk []) $ \(_ :: GHC.ParsedModule) info ->
+      return $ IdeResultOk $ Hie.getSymbolsAtPoint pos info
   let
     f = (==) `on` (Hie.showName . snd)
     f' = compare `on` (Hie.showName . snd)
@@ -617,9 +645,8 @@ data Decl = Decl LSP.SymbolKind (Located RdrName) [Decl] SrcSpan
 
 symbolProvider :: Uri -> IdeDeferM (IdeResult [LSP.DocumentSymbol])
 symbolProvider uri = pluginGetFile "ghc-mod symbolProvider: " uri $
-  \file -> withCachedModule file (IdeResultOk []) $ \cm -> do
-    let tm = tcMod cm
-        hsMod = unLoc $ pm_parsed_source $ tm_parsed_module tm
+  \file -> withCachedModule file (IdeResultOk []) $ \pm _ -> do
+    let hsMod = unLoc $ pm_parsed_source pm
         imports = hsmodImports hsMod
         imps  = concatMap goImport imports
         decls = concatMap go $ hsmodDecls hsMod

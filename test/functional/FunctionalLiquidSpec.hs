@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module LiquidSpec where
+module FunctionalLiquidSpec where
 
 import           Control.Lens hiding (List)
 import           Control.Monad.IO.Class
@@ -8,7 +8,8 @@ import           Data.Aeson
 import qualified Data.Text as T
 import           Language.Haskell.LSP.Test hiding (message)
 -- import           Language.Haskell.LSP       as LSP
-import           Language.Haskell.LSP.Types as LSP hiding (contents, error )
+import           Language.Haskell.LSP.Types as LSP
+import           Language.Haskell.LSP.Types.Lens as LSP hiding (contents, error )
 import           Haskell.Ide.Engine.LSP.Config
 import           Test.Hspec
 import           TestUtils
@@ -19,7 +20,7 @@ import           Utils
 spec :: Spec
 spec = describe "liquid haskell diagnostics" $ do
     it "runs diagnostics on save, no liquid" $
-      runSessionWithConfig noLogConfig hieCommandExamplePlugin codeActionSupportCaps "test/testdata" $ do
+      runSession hieCommandExamplePlugin codeActionSupportCaps "test/testdata" $ do
       -- runSessionWithConfig logConfig hieCommandExamplePlugin codeActionSupportCaps "test/testdata" $ do
         doc <- openDoc "liquid/Evens.hs" "haskell"
 
@@ -64,7 +65,7 @@ spec = describe "liquid haskell diagnostics" $ do
     -- ---------------------------------
 
     it "runs diagnostics on save, with liquid haskell" $
-      runSessionWithConfig noLogConfig hieCommand codeActionSupportCaps "test/testdata" $ do
+      runSession hieCommand codeActionSupportCaps "test/testdata" $ do
       -- runSessionWithConfig logConfig hieCommand codeActionSupportCaps "test/testdata" $ do
         doc <- openDoc "liquid/Evens.hs" "haskell"
 
@@ -82,9 +83,10 @@ spec = describe "liquid haskell diagnostics" $ do
         -- Enable liquid haskell plugin
         let config =
              Config
-               { hlintOn             = False
-               , maxNumberOfProblems = 50
-               , liquidOn            = True
+               { hlintOn              = False
+               , maxNumberOfProblems  = 50
+               , liquidOn             = True
+               , completionSnippetsOn = True
                }
         sendNotification WorkspaceDidChangeConfiguration (DidChangeConfigurationParams (toJSON config))
 
@@ -106,7 +108,7 @@ spec = describe "liquid haskell diagnostics" $ do
           d ^. severity `shouldBe` Just DsError
           d ^. code `shouldBe` Nothing
           d ^. source `shouldBe` Just "liquid"
-          d ^. message `shouldBe` (T.pack "Error: Liquid Type Mismatch\n  Inferred type\n    VV : {v : Int | v == (7 : int)}\n \n  not a subtype of Required type\n    VV : {VV : Int | VV mod 2 == 0}\n \n  In Context")
+          d ^. message `shouldSatisfy` (T.isPrefixOf "Error: Liquid Type Mismatch\n  Inferred type\n    VV : {v : Int | v == (7 : int)}\n \n  not a subtype of Required type\n    VV : {VV : Int | VV mod 2 == 0}\n")
 
 
 -- ---------------------------------------------------------------------

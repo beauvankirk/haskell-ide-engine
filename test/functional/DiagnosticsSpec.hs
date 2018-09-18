@@ -7,7 +7,8 @@ import           Control.Monad.IO.Class
 import qualified Data.Text as T
 import           Haskell.Ide.Engine.MonadFunctions
 import           Language.Haskell.LSP.Test hiding (message)
-import           Language.Haskell.LSP.Types as LSP hiding (contents, error )
+import           Language.Haskell.LSP.Types as LSP
+import           Language.Haskell.LSP.Types.Lens as LSP hiding (contents, error )
 import           Test.Hspec
 import           TestUtils
 import           Utils
@@ -18,9 +19,9 @@ spec :: Spec
 spec = describe "diagnostics providers" $ do
   describe "diagnostics triggers" $ do
     it "runs diagnostics on save" $
-      runSessionWithConfig noLogConfig hieCommandExamplePlugin codeActionSupportCaps "test/testdata" $ do
+      runSession hieCommandExamplePlugin codeActionSupportCaps "test/testdata" $ do
       -- runSessionWithConfig logConfig hieCommandExamplePlugin codeActionSupportCaps "test/testdata" $ do
-        logm $ "starting DiagnosticSpec.runs diagnostic on save"
+        logm "starting DiagnosticSpec.runs diagnostic on save"
         doc <- openDoc "ApplyRefact2.hs" "haskell"
 
         diags@(reduceDiag:_) <- waitForDiagnostics
@@ -54,12 +55,19 @@ spec = describe "diagnostics providers" $ do
           d ^. severity `shouldBe` Nothing
           d ^. code `shouldBe` Nothing
           d ^. source `shouldBe` Just "eg2"
-          d ^. message `shouldBe` (T.pack "Example plugin diagnostic, triggered byDiagnosticOnSave")
+          d ^. message `shouldBe` T.pack "Example plugin diagnostic, triggered byDiagnosticOnSave"
 
   describe "typed hole errors" $
     it "is deferred" $
-      runSessionWithConfig noLogConfig hieCommand fullCaps "test/testdata" $ do
+      runSession hieCommand fullCaps "test/testdata" $ do
         _ <- openDoc "TypedHoles.hs" "haskell"
+        [diag] <- waitForDiagnosticsSource "ghcmod"
+        liftIO $ diag ^. severity `shouldBe` Just DsWarning
+
+  describe "Warnings are warnings" $
+    it "Overrides -Werror" $
+      runSession hieCommand fullCaps "test/testdata/wErrorTest" $ do
+        _ <- openDoc "src/WError.hs" "haskell"
         [diag] <- waitForDiagnosticsSource "ghcmod"
         liftIO $ diag ^. severity `shouldBe` Just DsWarning
 
