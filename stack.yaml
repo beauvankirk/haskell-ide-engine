@@ -4,14 +4,23 @@ packages:
 - hie-plugin-api
 
 extra-deps:
-- ./submodules/HaRe
+# - ./submodules/HaRe
 #- - ./submodules/brittany
-- ./submodules/cabal-helper
-- ./submodules/ghc-mod
-- ./submodules/ghc-mod/core
+# - ./submodules/cabal-helper
+# - ./submodules/ghc-mod
+# - ./submodules/ghc-mod/core
 
 - git: https://github.com/beauvankirk/brittany.git
   commit: f5b9769e24c82661e750d853564ea0695f157974
+- git: https://github.com/beauvankirk/cabal-helper.git
+  commit: 2f73854e53977ab441310bf577028af099610b9b 
+- git: https://github.com/beauvankirk/ghc-mod.git
+  commit: 2f5eff6eee9cc8021ac1383df6e563f78eaee24a
+  subdirs:
+    - .
+    - ./core
+- git: https://github.com/alanz/HaRe.git
+  commit: 53979f062bebcaa132390d1fd0cec74a51662952
   #- apply-refact-0.6.0.0
   #- butcher-1.3.2.1
   #- cabal-plan-0.4.0.0
